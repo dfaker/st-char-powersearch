@@ -1,0 +1,12 @@
+{
+    "display_name": "Character Powersearch",
+    "loading_order": 1,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "depFA",
+    "version": "0.3.0",
+    "homePage": "https://github.com/dfaker/st-char-powersearch",
+    "auto_update": true
+}
