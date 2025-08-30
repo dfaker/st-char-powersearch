@@ -1,6 +1,6 @@
 # st-char-powersearch
 
-![Uploading image.png…]()
+<img width="3407" height="1266" alt="image" src="https://github.com/user-attachments/assets/3dea4b0a-d322-4aad-830a-958ca9c57986" />
 
 More powerful and faster character search for ST
 
