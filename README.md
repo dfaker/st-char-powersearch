@@ -1,4 +1,8 @@
 # st-char-powersearch
+
+<img width="2017" height="1154" alt="image" src="https://github.com/user-attachments/assets/fe55da83-2cc9-4dcb-a0ab-7171c7f18d55" />
+
+
 More powerful and faster character search for ST
 
 Install url: `https://github.com/dfaker/st-char-powersearch`
