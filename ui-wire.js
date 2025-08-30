@@ -1257,6 +1257,42 @@ function initAutocomplete(){
 }
 
 
+// === ui-wire.js — add after controls are defined (once) ===
+(function addAvatarOnlyToggle(){
+  const grid = document.querySelector('.grid[role="list"]');
+  if (!grid || document.getElementById('avatarOnlyToggle')) return;
+
+  // Insert a tiny switch in your header/toolbar area; adjust the selector if needed.
+  const host =
+    document.querySelector('.results-head') ||
+    document.querySelector('header') ||
+    document.body;
+
+  const wrap = document.createElement('label');
+  wrap.id = 'avatarOnlyToggle';
+  wrap.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:10px;cursor:pointer;';
+  wrap.innerHTML = `
+    <div>
+    <input type="checkbox" style="accent-color:#60a5fa">
+    <span class="micro" style="user-select:none">Avatars only</span>
+    </div>
+  `;
+  host.appendChild(wrap);
+
+  const cb = wrap.querySelector('input');
+  // Restore previous choice
+  const saved = localStorage.getItem('cards.avatarOnly') === '1';
+  cb.checked = saved;
+  grid.classList.toggle('avatar-only', saved);
+
+  cb.addEventListener('change', () => {
+    const on = cb.checked;
+    grid.classList.toggle('avatar-only', on);
+    localStorage.setItem('cards.avatarOnly', on ? '1' : '0');
+  });
+})();
+
+
 window.addEventListener('cards:ready', () => { 
   bindEvents(); 
   apply(); 

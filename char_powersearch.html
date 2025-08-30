@@ -113,6 +113,81 @@
     text-decoration: underline;    /* keep it obvious it’s a link */
   }
 
+/* === add to your stylesheet === */
+
+/* Card layout when showing avatar + buttons only */
+.grid.avatar-only .card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(220px, 32vw);
+}
+
+/* Make the avatar bigger and centered */
+.grid.avatar-only .card .avatar {
+  width: 180px;           /* tweak to taste */
+  height: 220px;
+  border-radius: 14px;
+  background-size: cover;
+  background-position: center;
+  box-shadow: 0 4px 18px rgba(0,0,0,.25);
+}
+
+/* Hide all the text blocks */
+.grid.avatar-only .card h4,
+.grid.avatar-only .card .meta,
+.grid.avatar-only .card .tags,
+.grid.avatar-only .card .snippet {
+  display: none !important;
+}
+
+/* Keep the action buttons visible and centered under the image */
+.grid.avatar-only .card .card-actions {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* Optional: make buttons a bit tighter/wider for this mode */
+.grid.avatar-only .card .card-actions .btn {
+  padding: 6px 10px;
+  min-width: 74px; /* so 'Similar'/'Details'/'Chat' feel balanced */
+}
+
+/* Existing hover effect (example) */
+.grid .card:hover .avatar {
+  transform: scale(1.05) translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0,0,0,.35);
+}
+
+/* Override when avatar-only mode is on */
+.grid.avatar-only .card:hover .avatar {
+  transform: none !important;
+  box-shadow: none !important;
+  cursor: default; /* optional, makes it feel inert */
+}
+
+/* Let cards stretch in avatar-only mode */
+.grid.avatar-only .card {
+  width: 100% !important;   /* fill the grid cell */
+  max-width: none;          /* remove hard cap if present */
+}
+
+/* Wider slots = bigger avatars/cards */
+.grid.avatar-only {
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+}
+
+/* Bigger avatar when cards are allowed to grow */
+.grid.avatar-only .card .avatar {
+  width: 100%;      /* span the card width */
+  height: auto;     /* maintain aspect ratio if you like */
+  aspect-ratio: 3/4; /* or fix ratio, e.g. portrait */
+}
+
   </style>
 
   <style type="text/css" src="/css/jquery-ui.min.css"></style>
