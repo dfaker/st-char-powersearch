@@ -1,6 +1,6 @@
 import { renderExtensionTemplateAsync } from "../../../extensions.js";
 import { tags as tagsStore, tag_map } from "../../../tags.js";
-import { characters as charactersStore, selectCharacterById } from "../../../../script.js";
+import { characters as charactersStore, selectCharacterById, unshallowCharacter } from "../../../../script.js";
 
 async function initSettings() {
   const html = await renderExtensionTemplateAsync("third-party/st-char-powersearch", "settings");
@@ -8,6 +8,8 @@ async function initSettings() {
   bindOpenButton();
 
   const $groupBtn = jQuery("#rm_button_group_chats");
+
+
   if ($groupBtn.length && !document.getElementById("pwr_charsearch")) {
     const $psBtn = jQuery(`
       <div id="pwr_charsearch"
@@ -22,7 +24,45 @@ async function initSettings() {
       jQuery("#char-powersearch_open").trigger("click");
     });
   }
+
+  const $favoriteBtn = jQuery("#favorite_button");
+
+  if ($favoriteBtn.length && !document.getElementById("pwr_charsearch2")) {
+    const $ps2Btn = jQuery(`
+      <div id="pwr_charsearch2"
+           title="Character Powersearch"
+           data-i18n="[title]Character Powersearch"
+           class="menu_button fa-solid fa-search-plus interactable"
+           tabindex="0"></div>
+    `);
+    $favoriteBtn.before($ps2Btn);
+
+    $ps2Btn.on("click", () => {
+      jQuery("#char-powersearch_open").trigger("click");
+    });
+  }
+
 }
+
+
+function flashTitle(times, interval = 500, alertText = "⚠️ ALERT ⚠️") {
+  const original = document.title;
+  let count = 0;
+  let showingAlert = false;
+
+  const timer = setInterval(() => {
+    document.title = showingAlert ? original : alertText;
+    showingAlert = !showingAlert;
+    count++;
+
+    if (count >= times * 2) { // each flash = 2 toggles
+      clearInterval(timer);
+      document.title = original; // reset
+    }
+  }, interval);
+}
+
+
 
 jQuery(() => { 
   initSettings(); 
@@ -61,9 +101,7 @@ const payload = structuredClone
     console.log(ev)
 
     const d = ev?.data;
-    if (!d) return;
-
-    
+    if (!d) return;  
 
     if (d.type === "ps-ready") {
       gotReady = true;
@@ -71,8 +109,24 @@ const payload = structuredClone
       return;
     }
 
+    if (d.type === "request-details" && d.id != null) {
+      (async () => {
+        try {
+          await unshallowCharacter(d.id);
+          const fulldata = charactersStore[d.id];
+          chan.postMessage({ type: "details", id: d.id, data: fulldata ?? null });
+        } catch (e) {
+          console.error("[Powersearch] details request failed:", e);
+          chan.postMessage({ type: "details", id: d.id, error: String(e) });
+        }
+      })();
+      return;
+    }
+
+
     if (d.type === "select" && d.id != null) {
       try {
+          flashTitle(3, 500, "Loading Chat...");
           selectCharacterById(d.id);
       } catch (e) {
         console.error("[Powersearch] selectCharacter failed:", e);
@@ -114,3 +168,4 @@ globalThis.selectCharacterById = selectCharacterById;
 globalThis.__ps_chars = charactersStore;
 globalThis.__ps_tags = tagsStore;
 globalThis.__ps_tag_map = tag_map;
+globalThis.__ps_unshallowCharacter = unshallowCharacter;

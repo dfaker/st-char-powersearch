@@ -31,6 +31,17 @@ function text(el, t){
   el.textContent = t == null ? "" : String(t);
 }
 
+function normalizeTagsLower(arr){
+  if (!Array.isArray(arr)) return [];
+  const out = new Set();
+  for (let t of arr){
+    if (t == null) continue;
+    t = String(t).trim().toLowerCase();
+    if (t) out.add(t);
+  }
+  return Array.from(out);
+}
+
 function create(tag, attrs={}, children=[]){
   const el = document.createElement(tag);
   for (const [k,v] of Object.entries(attrs)){
@@ -292,6 +303,42 @@ function sanitizeHTML_relaxed(dirty) {
   return doc.body.innerHTML;
 }
 
+// === Text-sim helpers (unigram+bigram TF-IDF) ===
+function htmlToPlainText(html){
+  if (!html) return "";
+  const doc = new DOMParser().parseFromString(String(html), "text/html");
+  return (doc.body.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function tokenizeText(s, { minN = 1, maxN = 3 } = {}){
+  const toks = String(s)
+  .toLowerCase()
+  .split(/[^\p{L}\p{N}]+/u)
+  .filter(Boolean);
+
+  const out = [];
+  for (let n = minN; n <= maxN; n++){
+    for (let i = 0; i + n <= toks.length; i++){
+      out.push(toks.slice(i, i + n).join(" "));
+    }
+  }
+  return out; // duplicates preserved => OK for TF
+}
+
+function cosineSimSparse(ma, mb){
+  if (!ma || !mb) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (const v of ma.values()) na += v*v;
+  for (const v of mb.values()) nb += v*v;
+  const [small, big] = (ma.size < mb.size) ? [ma, mb] : [mb, ma];
+  for (const [k, va] of small){
+    const vb = big.get(k);
+    if (vb) dot += va*vb;
+  }
+  if (!dot || !na || !nb) return 0;
+  return dot / Math.sqrt(na*nb);
+}
+
 
 
 function buildStore(payload){
@@ -320,7 +367,7 @@ function buildStore(payload){
       for (const t of tagList) tagUniverse.add(t);
       const creator = safeGet(c, "data.creator", "") || "";
       const creator_notes = sanitizeHTML_relaxed(safeGet(c, "data.creator_notes", "") || "");
-      const description = sanitizeHTML_relaxed(safeGet(c, "data.description", "") || ""); // optional
+      const description = sanitizeHTML_relaxed(safeGet(c, "data.description", "") || "");
       const fav = !!safeGet(c, "data.extensions.fav", safeGet(c, "extensions.fav", false));
       const dateAdded = Number(c.date_added || 0) || 0;
       const lastChat = Number(c.date_last_chat || 0) || 0;
@@ -332,7 +379,29 @@ function buildStore(payload){
         avatar: c.avatar || null, chat: c.chat || "",
         date_added: dateAdded, date_last_chat: lastChat,
         chat_size: chatSize, data_size: dataSize,
-        tags: tagList, creator, creator_notes, description,
+        tags: (() => {
+          const selfTags = normalizeTagsLower(c.tags || []);
+
+          // tag_map: avatar -> string[] (Map or plain object)
+          const avatarKey =
+            c.avatar ||
+            (c.data && c.data.avatar) ||
+            c.image ||
+            "";
+
+          // safe fetch: Map.get(...) OR object[...] OR fallback to [].
+          const fromMapRaw =
+            (tag_map && typeof tag_map.get === "function" && tag_map.get(avatarKey)) ||
+            (tag_map && typeof tag_map === "object" && tag_map[avatarKey]) ||
+            [];
+
+          const mapTags = normalizeTagsLower(fromMapRaw);
+
+          // Union, lowercased, deduped
+          return Array.from(new Set([...selfTags, ...mapTags]));
+        })(),
+
+        creator, creator_notes, description,
         fav, raw: c
       };
       rows.push(row); byId.set(id, row);
@@ -490,6 +559,115 @@ function parseWeights(input){
   return weights;
 }
 
+const STOPWORDS = new Set([
+  "a","an","the","and","or","but","if","to","in","on","with","for","of","at",
+  "by","from","up","out","over","under","then","so","than","too","very","can",
+  "will","just","is","are","was","were","be","been","being","have","has","had",
+  "do","does","did","i","you","he","she","it","we","they","them","this","that",
+  "these","those"
+]);
+
+function tokenizeForIndex(text){
+  const raw = String(text)
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+
+  const toks = [];
+  for (let i = 0; i < raw.length; i++){
+    const w1 = raw[i]; if (!STOPWORDS.has(w1)) toks.push(w1);         // unigram
+    if (i + 1 < raw.length){
+      const w2 = raw[i+1];
+      if (!STOPWORDS.has(w1) && !STOPWORDS.has(w2)) toks.push(w1+" "+w2); // bigram
+    }
+  }
+  return toks; // duplicates kept for TF
+}
+
+
+function buildTextIndex(storeOrCharacters, {reportProgress=true} = {}){
+  // Determine rows from the argument only
+  let rows, cacheTarget = null;
+  if (storeOrCharacters && Array.isArray(storeOrCharacters.rows)) {
+    rows = storeOrCharacters.rows;
+    cacheTarget = storeOrCharacters;              // where we'll cache textIndex
+    if (cacheTarget.textIndex && cacheTarget.textIndex.built) return cacheTarget.textIndex;
+  } else if (Array.isArray(storeOrCharacters)) {
+    rows = storeOrCharacters.map(c => ({
+      id: c.id ?? c.name ?? String(Math.random()),
+      creator_notes: c?.data?.creator_notes || "",
+      description:   c?.data?.description   || ""
+    }));
+  } else {
+    console.error("[buildTextIndex] invalid input:", storeOrCharacters);
+    return { idf:new Map(), vecs:new Map(), built:true, docs:0, vocabSize:0 };
+  }
+
+  if (reportProgress){ setLoadStatusText("Indexing descriptions…"); setProgress(.76, "Token DF pass"); }
+
+  // Collect per-doc TF and DF with weighting (desc 2× vs notes 1×)
+  const df = new Map();
+  const docs = [];
+  let totalLen = 0;
+
+  for (const r of rows){
+    const notes = String(r.creator_notes || "");
+    const desc  = String(r.description   || "");
+    const weighted = (notes + " " + notes + " " + desc + " " + desc).trim();
+
+    const toks = tokenizeForIndex(weighted);
+    const tf = new Map();
+    for (const t of toks) tf.set(t, (tf.get(t) || 0) + 1);
+
+    const seen = new Set();
+    for (const t of tf.keys()){
+      if (seen.has(t)) continue;
+      seen.add(t);
+      df.set(t, (df.get(t) || 0) + 1);
+    }
+
+    docs.push({ id: r.id, tf, len: toks.length });
+    totalLen += toks.length;
+  }
+
+  // IDF with cutoffs (drop DF==1 and DF/N > 1%)
+  if (reportProgress){ setProgress(.82, "Computing text IDF"); }
+  const N = Math.max(1, docs.length);
+  const idf = new Map();
+  for (const [t, dfi] of df.entries()){
+    if (dfi <= 1) continue;
+    if ((dfi / N) > 0.01) continue;
+    idf.set(t, Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5)));
+  }
+
+  // BM25 vectors
+  if (reportProgress){ setProgress(.86, "Building BM25 vectors"); }
+  const vecs = new Map();
+  const k1 = 1.5, b = 0.75;
+  const avgdl = totalLen / N;
+
+  for (const {id, tf, len} of docs){
+    const m = new Map();
+    for (const [t, f] of tf.entries()){
+      const itf = idf.get(t);
+      if (!itf) continue;
+      const denom = f + k1 * (1 - b + b * (len / avgdl));
+      const w = itf * (f * (k1 + 1)) / denom;
+      m.set(t, w);
+    }
+    vecs.set(id, m);
+  }
+
+  const out = { idf, vecs, built:true, docs:N, vocabSize:idf.size };
+  if (cacheTarget) cacheTarget.textIndex = out;  // cache only on the passed-in store
+  return out;
+}
+
+
+
+
+
+
 /* ============================ Query helpers ============================ */
 
 function makeQueryAPI(store){
@@ -503,6 +681,336 @@ function makeQueryAPI(store){
     return s;
   }
   return {
+    tagSimilarity(a, b, { mode = "jaccard", weightTags = true, idfMul = 1 } = {}){
+      const A = new Set(a.tags);
+      const B = new Set(b.tags);
+
+      if (mode === "none") return 0;
+
+      if (mode === "overlap"){
+        // IDF-boosted overlap: sum weights on intersection
+        // weight = 1 + IDF*(idfMul - 1) when weightTags, else 1
+        let s = 0;
+        for (const t of A){
+          if (!B.has(t)) continue;
+          if (weightTags){
+            const idf = store.idf[t] || 0;
+            s += 1 + idf * (idfMul - 1);
+          } else {
+            s += 1;
+          }
+        }
+        return s;
+      }
+
+      if (mode === "jaccard"){
+        let inter = 0, uni = new Set([...A, ...B]).size;
+        for (const t of A) if (B.has(t)) inter++;
+        return uni ? inter / uni : 0;
+      }
+
+      if (mode === "dice"){
+        let inter = 0;
+        for (const t of A) if (B.has(t)) inter++;
+        const total = A.size + B.size;
+        return total ? (2 * inter) / total : 0;
+      }
+
+      if (mode === "tanimoto"){
+        // Tanimoto is equivalent to Jaccard for binary sets
+        let inter = 0, uni = new Set([...A, ...B]).size;
+        for (const t of A) if (B.has(t)) inter++;
+        return uni ? inter / uni : 0;
+      }
+
+      if (mode === "ochiai"){
+        let inter = 0;
+        for (const t of A) if (B.has(t)) inter++;
+        const denom = Math.sqrt(A.size * B.size);
+        return denom ? inter / denom : 0;
+      }
+
+      if (mode === "simpson"){
+        let inter = 0;
+        for (const t of A) if (B.has(t)) inter++;
+        const minSize = Math.min(A.size, B.size);
+        return minSize ? inter / minSize : 0;
+      }
+
+      if (mode === "braun-blanquet"){
+        let inter = 0;
+        for (const t of A) if (B.has(t)) inter++;
+        const maxSize = Math.max(A.size, B.size);
+        return maxSize ? inter / maxSize : 0;
+      }
+
+      if (mode === "hamming"){
+        // Hamming distance (normalized): count of differing positions
+        const union = new Set([...A, ...B]);
+        let diff = 0;
+        for (const t of union){
+          if (A.has(t) !== B.has(t)) diff++;
+        }
+        return union.size ? 1 - (diff / union.size) : 1;
+      }
+
+      if (mode === "manhattan"){
+        // Manhattan distance (normalized): sum of absolute differences
+        const union = new Set([...A, ...B]);
+        let dist = 0;
+        for (const t of union){
+          const aHas = A.has(t) ? 1 : 0;
+          const bHas = B.has(t) ? 1 : 0;
+          dist += Math.abs(aHas - bHas);
+        }
+        return union.size ? 1 - (dist / union.size) : 1;
+      }
+
+      if (mode === "euclidean"){
+        // Euclidean distance (normalized): sqrt of sum of squared differences
+        const union = new Set([...A, ...B]);
+        let dist = 0;
+        for (const t of union){
+          const aHas = A.has(t) ? 1 : 0;
+          const bHas = B.has(t) ? 1 : 0;
+          dist += Math.pow(aHas - bHas, 2);
+        }
+        const maxDist = Math.sqrt(union.size);
+        return maxDist ? 1 - (Math.sqrt(dist) / maxDist) : 1;
+      }
+
+      // Default: cosine over sparse tag vectors (optionally IDF-weighted)
+      const wa = new Map(), wb = new Map();
+      for (const t of A) wa.set(t, weightTags ? (store.idf[t] || 1) : 1);
+      for (const t of B) wb.set(t, weightTags ? (store.idf[t] || 1) : 1);
+      return cosineSimSparse(wa, wb);
+    },
+
+    textSimilarityById(aId, bId, { mode = "cosine", ngramMin = 1, ngramMax = 3 } = {}){
+      if (mode === "none") return 0;
+
+      const A = store.byId.get(aId), B = store.byId.get(bId);
+      if (!A || !B) return 0;
+
+      const textA = (A.creator_notes || "") + " " + (A.description || "");
+      const textB = (B.creator_notes || "") + " " + (B.description || "");
+
+      if (!textA.trim() || !textB.trim()) return 0;
+
+      if (mode.startsWith("cosine")){
+        // Extract n-gram range from mode name
+        let minN = ngramMin, maxN = ngramMax;
+        if (mode.includes("-1gram")) { minN = 1; maxN = 1; }
+        else if (mode.includes("-2gram")) { minN = 1; maxN = 2; }
+        else if (mode.includes("-3gram")) { minN = 1; maxN = 3; }
+        else if (mode.includes("-4gram")) { minN = 1; maxN = 4; }
+
+        const toksA = tokenizeText(textA, { minN, maxN });
+        const toksB = tokenizeText(textB, { minN, maxN });
+
+        const tfA = new Map(), tfB = new Map();
+        for (const t of toksA) tfA.set(t, (tfA.get(t) || 0) + 1);
+        for (const t of toksB) tfB.set(t, (tfB.get(t) || 0) + 1);
+
+        return cosineSimSparse(tfA, tfB);
+      }
+
+      if (mode.startsWith("bm25")){
+        // Use existing BM25 index for BM25 similarity
+        const ti = store.textIndex?.built ? store.textIndex : buildTextIndex(store, {reportProgress:true});
+        const va = ti.vecs.get(aId), vb = ti.vecs.get(bId);
+        return cosineSimSparse(va, vb);
+      }
+
+      if (mode.startsWith("jaccard")){
+        let minN = ngramMin, maxN = ngramMax;
+        if (mode.includes("-2gram")) { minN = 2; maxN = 2; }
+        else if (mode.includes("-3gram")) { minN = 3; maxN = 3; }
+        else if (mode.includes("-4gram")) { minN = 4; maxN = 4; }
+        else if (mode === "jaccard-text") { minN = 1; maxN = 1; }
+
+        const setA = new Set(tokenizeText(textA, { minN, maxN }));
+        const setB = new Set(tokenizeText(textB, { minN, maxN }));
+        const inter = new Set([...setA].filter(x => setB.has(x))).size;
+        const union = new Set([...setA, ...setB]).size;
+        return union ? inter / union : 0;
+      }
+
+      if (mode === "dice-text"){
+        const setA = new Set(tokenizeText(textA, { minN: 1, maxN: 1 }));
+        const setB = new Set(tokenizeText(textB, { minN: 1, maxN: 1 }));
+        const inter = new Set([...setA].filter(x => setB.has(x))).size;
+        return (setA.size + setB.size) ? (2 * inter) / (setA.size + setB.size) : 0;
+      }
+
+      if (mode === "overlap-text"){
+        const setA = new Set(tokenizeText(textA, { minN: 1, maxN: 1 }));
+        const setB = new Set(tokenizeText(textB, { minN: 1, maxN: 1 }));
+        return new Set([...setA].filter(x => setB.has(x))).size;
+      }
+
+      if (mode === "levenshtein"){
+        return this.levenshteinSimilarity(textA, textB);
+      }
+
+      if (mode === "jaro-winkler"){
+        return this.jaroWinklerSimilarity(textA, textB);
+      }
+
+      if (mode === "lcs"){
+        return this.lcsSimilarity(textA, textB);
+      }
+
+      if (mode === "semantic-hash"){
+        return this.semanticHashSimilarity(textA, textB);
+      }
+
+      // Default: cosine with TF-IDF
+      const ti = store.textIndex?.built ? store.textIndex : buildTextIndex(store, {reportProgress:true});
+      const va = ti.vecs.get(aId), vb = ti.vecs.get(bId);
+      return cosineSimSparse(va, vb);
+    },
+
+    levenshteinSimilarity(a, b){
+      const maxLen = Math.max(a.length, b.length);
+      if (maxLen === 0) return 1;
+      const dist = this.levenshteinDistance(a, b);
+      return 1 - (dist / maxLen);
+    },
+
+    levenshteinDistance(a, b){
+      const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
+      for (let i = 0; i <= a.length; i++) matrix[0][i] = i;
+      for (let j = 0; j <= b.length; j++) matrix[j][0] = j;
+      for (let j = 1; j <= b.length; j++){
+        for (let i = 1; i <= a.length; i++){
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          matrix[j][i] = Math.min(
+            matrix[j][i - 1] + 1,
+            matrix[j - 1][i] + 1,
+            matrix[j - 1][i - 1] + cost
+          );
+        }
+      }
+      return matrix[b.length][a.length];
+    },
+
+    jaroWinklerSimilarity(a, b){
+      const jaro = this.jaroSimilarity(a, b);
+      if (jaro < 0.7) return jaro;
+      let prefix = 0;
+      for (let i = 0; i < Math.min(a.length, b.length, 4); i++){
+        if (a[i] === b[i]) prefix++;
+        else break;
+      }
+      return jaro + (0.1 * prefix * (1 - jaro));
+    },
+
+    jaroSimilarity(a, b){
+      if (a === b) return 1;
+      const len1 = a.length, len2 = b.length;
+      if (len1 === 0 || len2 === 0) return 0;
+      const matchWindow = Math.floor(Math.max(len1, len2) / 2) - 1;
+      const matches1 = new Array(len1).fill(false);
+      const matches2 = new Array(len2).fill(false);
+      let matches = 0, transpositions = 0;
+      for (let i = 0; i < len1; i++){
+        const start = Math.max(0, i - matchWindow);
+        const end = Math.min(i + matchWindow + 1, len2);
+        for (let j = start; j < end; j++){
+          if (matches2[j] || a[i] !== b[j]) continue;
+          matches1[i] = matches2[j] = true;
+          matches++;
+          break;
+        }
+      }
+      if (matches === 0) return 0;
+      let k = 0;
+      for (let i = 0; i < len1; i++){
+        if (!matches1[i]) continue;
+        while (!matches2[k]) k++;
+        if (a[i] !== b[k]) transpositions++;
+        k++;
+      }
+      return (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3;
+    },
+
+    lcsSimilarity(a, b){
+      const lcs = this.longestCommonSubsequence(a, b);
+      const maxLen = Math.max(a.length, b.length);
+      return maxLen ? lcs / maxLen : 1;
+    },
+
+    longestCommonSubsequence(a, b){
+      const m = a.length, n = b.length;
+      const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+      for (let i = 1; i <= m; i++){
+        for (let j = 1; j <= n; j++){
+          if (a[i - 1] === b[j - 1]){
+            dp[i][j] = dp[i - 1][j - 1] + 1;
+          } else {
+            dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+          }
+        }
+      }
+      return dp[m][n];
+    },
+
+    semanticHashSimilarity(a, b){
+      const hashA = this.simpleSemanticHash(a);
+      const hashB = this.simpleSemanticHash(b);
+      let matches = 0;
+      for (let i = 0; i < Math.min(hashA.length, hashB.length); i++){
+        if (hashA[i] === hashB[i]) matches++;
+      }
+      return Math.max(hashA.length, hashB.length) ? matches / Math.max(hashA.length, hashB.length) : 0;
+    },
+
+    simpleSemanticHash(text){
+      const words = text.toLowerCase().split(/\W+/).filter(Boolean);
+      const features = new Map();
+      for (const word of words){
+        features.set(word, (features.get(word) || 0) + 1);
+      }
+      const sorted = Array.from(features.entries()).sort((a, b) => b[1] - a[1]);
+      return sorted.slice(0, 32).map(([word]) => word).join('');
+    },
+
+
+    /** Combined similarity: alpha*tag + (1-alpha)*text
+        opts: { tagMode:'jaccard'|'cosine', descMode:'cosine', weightTags:true, includeText:true, alpha:0.6, ngramMin:1, ngramMax:3 } */
+    combinedSimilarity(aId, bId, opts = {}){
+      const {
+        tagMode = 'cosine',
+        descMode = 'cosine',
+        weightTags = true,
+        includeText = true,
+        includeTags = true,
+        alpha = 0.6,
+        idfMul = 1,
+        ngramMin = 1,
+        ngramMax = 3
+      } = opts;
+
+      const A = store.byId.get(aId), B = store.byId.get(bId);
+      if (!A || !B) return 0;
+
+      let sTag = 0, sText = 0;
+
+      if (includeTags){
+        sTag = this.tagSimilarity(A, B, { mode: tagMode, weightTags, idfMul });
+      }
+      if (includeText){
+        sText = this.textSimilarityById(aId, bId, { mode: descMode, ngramMin, ngramMax });
+      }
+
+      if (includeTags && includeText) return alpha * sTag + (1 - alpha) * sText;
+      if (includeTags) return sTag;
+      if (includeText) return sText;
+      return 0;
+    },
+
+
     /** Filter rows by boolean tag expression (string), then optional tag count range and rarity range. */
     filter({ expr, tagCountMin = 0, tagCountMax = 1e9, rarityMin = -1e9, rarityMax = 1e9 }){
       const be = parseBoolExpr(expr);
@@ -588,6 +1096,7 @@ function attachChannel(){
         parseBoolExpr,
         parseWeights,
         setBlocking, setProgress, setLoadStatusText,
+        ensureTextIndex: () => buildTextIndex(store, {reportProgress:true}), // <-- add this
       };
 
       // Dispatch event for the SPA to hook into

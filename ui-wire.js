@@ -142,7 +142,6 @@ function suggestTags(prefix, limit=200){
   }
 
 
-
   const sortMap = new Map([
     ['Name ↑ (A → Z)',              { by:'name', dir:'asc'  }],
     ['Name ↓ (Z → A)',              { by:'name', dir:'desc' }],
@@ -167,31 +166,14 @@ function suggestTags(prefix, limit=200){
 
   function getSortChoice(){
     const sel = ctl.sortSelect;
-    if (!sel) return { by:'score', dir:'desc' };
+    if (!sel) return { by:'date_added', dir:'desc' };
     const label = sel.value || sel.getAttribute('selected') || '';
-    return sortMap.get(label) || { by:'score', dir:'desc' };
+    return sortMap.get(label) || { by:'date_added', dir:'desc' };
   }
   function parseTagBundle(s){
     const out = []; const re = /"([^"]+)"|'([^']+)'|([^,\s][^,]*)/g; let m;
     while ((m = re.exec(String(s||"")))){ const tag=(m[1]||m[2]||m[3]||'').trim(); if (tag) out.push(tag); }
     return out;
-  }
-
-
-  // --- N-gram probable-tags (minimal, non-blocking) -----------------------
-  function insertNgramButton(){
-    if (!ctl.boolExpr) return;
-    const btn = document.createElement('a');
-    btn.href = "#";
-    btn.className = "btn";
-    btn.textContent = "Generate Ngram Probable tags THIS IS SLOW!";
-    btn.style.marginTop = "8px";
-    btn.addEventListener('click', (e)=>{ e.preventDefault(); runNgramProbableTags(); });
-    // place right under the Boolean-rule textarea
-    const host = document.getElementById('finalSection')
-    if(host){
-      host.appendChild(btn);
-    }
   }
 
   function runNgramProbableTags(){
@@ -360,10 +342,239 @@ function suggestTags(prefix, limit=200){
   }
 
 
+function ensureDetailsModal(){
+  if (document.getElementById('ps-details-modal')) return;
+  const el = document.createElement('div');
+  el.id = 'ps-details-modal';
+  el.style.cssText = `
+    position:fixed; inset:0; display:none; z-index:99999;
+    background:rgba(0,0,0,.6); backdrop-filter: blur(4px);
+  `;
+  el.innerHTML = `
+    <div style="position:absolute; inset:0; display:grid; place-items:center">
+      <div style="width:min(960px,92vw); max-height:80vh; overflow:auto;
+                  background:#0c1117; border:1px solid #1f2937; border-radius:12px;
+                  box-shadow:0 16px 70px rgba(0,0,0,.6); color:#e5e7eb; padding:14px">
+
+        <!-- BIG AVATAR -->
+        <div style="text-align:center; margin-bottom:12px">
+          <img id="psd-avatar"
+               style="max-height:500px; border-radius:16px;
+                      border:1px solid #1f2937; object-fit:cover; background:#111827" />
+        </div>
+
+        <!-- Title and Close -->
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px">
+          <div style="flex:1 1 auto; min-width:0">
+            <div id="psd-title" style="font-weight:700; white-space:nowrap;
+                overflow:hidden; text-overflow:ellipsis">Details</div>
+            <div id="psd-sub" class="micro" style="color:#93a3af"></div>
+          </div>
+          <button id="psd-close" class="btn" style="color:white;">Close</button>
+        </div>
+
+        <!-- Tabs -->
+        <div style="display:flex; gap:6px; border-bottom:1px solid #1f2937; margin-bottom:10px">
+          <button id="psd-tab-overview" class="btn" data-active="true"
+                  style="padding:6px 10px; border-bottom:2px solid #60a5fa;color:white;">Overview</button>
+          <button id="psd-tab-json" class="btn"
+                  style="padding:6px 10px; border-bottom:2px solid transparent;color:white;">JSON</button>
+        </div>
+
+        <!-- Overview content -->
+        <div id="psd-overview" style="display:block"></div>
+
+        <!-- JSON content -->
+        <pre id="psd-json" style="display:none; margin:0; white-space:pre-wrap; word-break:break-word;
+             background:#0b0f16; border:1px solid #1f2937; border-radius:8px; padding:12px;
+             font-family:ui-monospace,Menlo,Consolas,monospace;"></pre>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+
+  el.querySelector('#psd-close')?.addEventListener('click', ()=> el.style.display='none');
+
+  // Tab switching
+  const tabA = el.querySelector('#psd-tab-overview');
+  const tabB = el.querySelector('#psd-tab-json');
+  const paneA = el.querySelector('#psd-overview');
+  const paneB = el.querySelector('#psd-json');
+
+  function activate(which){
+    const a = (which === 'overview');
+    tabA.dataset.active = a ? 'true' : 'false';
+    tabB.dataset.active = a ? 'false' : 'true';
+    tabA.style.borderBottom = a ? '2px solid #60a5fa' : '2px solid transparent';
+    tabB.style.borderBottom = !a ? '2px solid #60a5fa' : '2px solid transparent';
+    paneA.style.display = a ? 'block' : 'none';
+    paneB.style.display = a ? 'none' : 'block';
+  }
+  tabA.addEventListener('click', ()=> activate('overview'));
+  tabB.addEventListener('click', ()=> activate('json'));
+  activate('overview');
+
+  // one global listener for producer replies
+  if (window.channel && !window.__psDetailsWired){
+    window.__psDetailsWired = true;
+    window.channel.addEventListener('message', (ev) => {
+      const d = ev?.data;
+      if (!d || d.type !== 'details') return;
+      fillDetailsModal({ loading:false, id:d.id, data:d.data });
+    });
+  }
+}
+
+function fillDetailsModal({ loading, id, name, avatar, data }){
+  // Ensure the modal exists (creates the new 2-tab one if missing)
+  ensureDetailsModal();
+
+  const wrap = document.getElementById('ps-details-modal');
+  if (!wrap) { console.error('[ps] modal wrapper missing'); return; }
+
+  wrap.style.display = 'block';
+
+  // Try new IDs first, then fall back to old IDs
+  const t   = wrap.querySelector('#psd-title')          || wrap.querySelector('#ps-details-title');
+  const sub = wrap.querySelector('#psd-sub')            || wrap.querySelector('#ps-details-sub');
+  const av  = wrap.querySelector('#psd-avatar')         || null;
+  const pre = wrap.querySelector('#psd-json')           || wrap.querySelector('#ps-details-body');
+  const ov  = wrap.querySelector('#psd-overview')       || null; // old modal had no overview
+
+  // If even title is missing, bail gracefully
+  if (!t) { console.error('[ps] modal content not found (did old/new IDs mismatch?)'); return; }
+
+  // Loading state
+  if (loading){
+    if (t)   t.textContent = name ? `Details — ${name}` : 'Details';
+    if (sub) sub.textContent = (id != null) ? `• id ${id}` : '';
+
+    if (av && avatar){
+      av.src = `/thumbnail?type=avatar&file=${avatar}`;
+    }
+
+    if (pre) pre.textContent = '(loading…)';
+    if (ov)  ov.innerHTML = `<div style="color:#9ca3af">(loading…)</div>`;
+    return;
+  }
+
+  // Got data: normalize and render
+  const n = normalizeCard(data || {});
+  if (t)   t.textContent = n.name ? `Details — ${n.name}` : 'Details';
+  if (sub) sub.textContent = (id != null) ? `• id ${id}` : '';
+  if (av && n.avatar){
+    av.style.backgroundImage = `url(/thumbnail?type=avatar&file=${n.avatar})`;
+    av.style.backgroundSize = 'cover';
+  }
+  if (pre) pre.textContent = JSON.stringify(data ?? null, null, 2);
+  if (ov)  ov.innerHTML = renderOverviewHTML(n); // if old modal is present, ov is null and this is skipped
+}
+
+
+function normalizeCard(d){
+  const top = d || {};
+  const inner = (top.data && typeof top.data === 'object') ? top.data : {};
+  const get = (k, def=null) => (top[k] ?? inner[k] ?? def);
+
+  // existing fields
+  const name = get('name', top.name || inner?.data?.name || '');
+  const avatar = get('avatar', top.avatar || '');
+  const desc = get('description', '');
+  const first_mes = get('first_mes', '');
+  const scenario = get('scenario', '');
+  const tags = get('tags', []);
+  const creator_notes = get('creator_notes', '');
+  const spec = top.spec || inner.spec || 'unknown';
+  const spec_version = top.spec_version || inner.spec_version || '';
+  const character_version = get('character_version', '');
+  const creator = get('creator', '');
+
+  // NEW: fields you asked to surface
+  const personality = get('personality', '');
+  const mes_example = get('mes_example', '');
+  const system_prompt = get('system_prompt', '');
+  const post_history_instructions = get('post_history_instructions', '');
+  const alternate_greetings = Array.isArray(get('alternate_greetings', []))
+    ? get('alternate_greetings', [])
+    : [];
+
+  // small redactor so Overview stays snappy
+  const clamp = (s, n=1400) => (typeof s === 'string' && s.length > n ? s.slice(0,n) + '…' : s);
+
+  return {
+    name, avatar, spec, spec_version, character_version, creator,
+    tags: Array.isArray(tags) ? tags : [],
+    description: clamp(desc, 2000),
+    scenario: clamp(scenario, 1200),
+    first_mes: clamp(first_mes, 1000),
+    creator_notes: clamp(creator_notes, 800),
+
+    // NEW
+    personality: clamp(personality, 1000),
+    mes_example: clamp(mes_example, 1000),
+    system_prompt: clamp(system_prompt, 1000),
+    post_history_instructions: clamp(post_history_instructions, 800),
+    alternate_greetings: alternate_greetings.map(s => clamp(String(s ?? ''), 1000)),
+  };
+}
+
+
+function renderOverviewHTML(n){
+  const pill = (t)=> `<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border:1px solid #1f2937;border-radius:999px;background:#0b1220">${escapeHTML(t)}</span>`;
+  const row = (k,v)=> `
+    <div style="display:grid; grid-template-columns:140px 1fr; gap:10px; padding:8px 0; border-bottom:1px solid #111827">
+      <div style="color:#93a3af">${k}</div>
+      <div>${v}</div>
+    </div>`;
+
+  // helper to render pre-wrapped text blocks
+  const pre = (s)=> `<div style="white-space:pre-wrap">${escapeHTML(s || '')}</div>`;
+
+  // render alternate greetings as individual rows (AG #1, AG #2, …)
+  const agRows = (Array.isArray(n.alternate_greetings) && n.alternate_greetings.length)
+    ? n.alternate_greetings.map((g, i) => row(`AG #${i+1}`, pre(g))).join('')
+    : '';
+
+  return `
+    <div style="display:grid; gap:4px">
+      ${row('Name',       `<strong>${escapeHTML(n.name || '(unknown)')}</strong>`)}
+      ${row('Spec',       `${escapeHTML(n.spec)} ${n.spec_version ? `· v${escapeHTML(n.spec_version)}`:''}`)}
+      ${row('Creator',    `${escapeHTML(n.creator || '')} ${n.character_version ? `· ${escapeHTML(n.character_version)}`:''}`)}
+      ${row('Tags',       (n.tags?.length ? n.tags.map(pill).join('') : `<span style="color:#6b7280">(none)</span>`))}
+
+      ${row('Scenario',   pre(n.scenario))}
+      ${row('First Message', pre(n.first_mes))}
+      ${row('Description', pre(n.description))}
+      ${row('Creator Notes', pre(n.creator_notes))}
+
+      <!-- NEW fields -->
+      ${row('Personality', pre(n.personality))}
+      ${row('Message Example', pre(n.mes_example))}
+      ${row('System Prompt', pre(n.system_prompt))}
+      ${row('Post-History Instr.', pre(n.post_history_instructions))}
+
+      ${agRows}
+    </div>
+  `;
+}
+
+
+function escapeHTML(s){
+  return String(s ?? '')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'","&#39;");
+}
+
+
 
 
 function makeCard(r, weights){
   const score = (() => {
+    // In similarity mode, use the similarity score if available
+    if (r._similarityScore !== undefined) return r._similarityScore;
+    // Otherwise use weights-based scoring
     if (!weights || !weights.size) return 0;
     let s = 0; for (const t of r.tags){ const w = weights.get(t); if (w) s += w; }
     return s;
@@ -372,6 +583,7 @@ function makeCard(r, weights){
   const node = document.createElement('article');
   node.className = 'card';
   node.setAttribute('role','listitem');
+
 
   node.innerHTML = `
     <div class="avatar" data-avatar>84×84</div>
@@ -398,8 +610,9 @@ function makeCard(r, weights){
         ((r.description||'').length > 219 || (r.creator_notes||'').length > 512) ? '…' : ''
       }</p>
       <div class="card-actions">
-        <a href="#" class="btn" role="button" data-action="view-similar">View Similar</a>
-        <a href="#" class="btn" role="button" data-action="start-chat">Start Chat</a>
+        <a href="#" class="btn" role="button" data-action="view-similar">Similar</a>
+        <a href="#" class="btn" role="button" data-action="view-details">Details</a>
+        <a href="#" class="btn" role="button" data-action="start-chat">Chat</a>
       </div>
     </div>
   `;
@@ -408,7 +621,6 @@ function makeCard(r, weights){
   const av = node.querySelector('[data-avatar]');
   if (r.avatar){
     av.style.backgroundImage = `url(/thumbnail?type=avatar&file=${r.avatar})`;
-    av.style.backgroundSize = 'cover';
     av.textContent = '';
   }
 
@@ -427,6 +639,16 @@ function makeCard(r, weights){
     enterSimilarityMode(r); // defined below
   });
 
+  const detailsBtn = node.querySelector('[data-action="view-details"]');
+  detailsBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    ensureDetailsModal();
+    fillDetailsModal({ loading: true, id: r.id, name: r.name, avatar: r.avatar });
+    const channel = window.channel || null;
+    channel?.postMessage({ type: 'request-details', id: r.id });
+  });
+
+
   return node;
 }
 
@@ -440,6 +662,18 @@ function createSimilarityAside(refRow){
   aside.className = 'sidebar similarity';
   aside.setAttribute('aria-label','Similarity Controls');
 
+
+  // Get persisted values or defaults
+  const persistedValues = window.similaritySettings || {};
+  const tagMetric = persistedValues.tagMetric || 'jaccard';
+  const descMetric = persistedValues.descMetric || 'none';
+  const minShared = persistedValues.minShared || 2;
+  const idfMul = persistedValues.idfMul || 100;
+  const limit = persistedValues.limit || 500;
+  const ngramMin = persistedValues.ngramMin || 1;
+  const ngramMax = persistedValues.ngramMax || 3;
+  const alpha = persistedValues.alpha || 60;
+
   aside.innerHTML = `
     <section class="section">
       <header>
@@ -447,28 +681,77 @@ function createSimilarityAside(refRow){
         <span class="micro">Reference: <strong>${(refRow.name||'—')}</strong></span>
       </header>
       <div class="body">
-        <div class="hint" style="margin-bottom:8px">
-          Compare by tag overlap, Jaccard, or Cosine. Overlap can be rarity-boosted (IDF).
-        </div>
 
-        <label class="hint">Metric</label>
-        <select data-sim="metric" style="margin-bottom:10px">
-          <option value="overlap">Tag overlap (IDF-boostable)</option>
-          <option value="jaccard" selected>Weighted Jaccard (IDF)</option>
-          <option value="cosine">Cosine (TF-IDF on tags)</option>
+
+
+        <label class="hint">Tag similarity</label>
+        <select data-sim="tag-metric" style="margin-bottom:10px">
+          <option value="none" ${tagMetric === 'none' ? 'selected' : ''}>None</option>
+          <option value="overlap" ${tagMetric === 'overlap' ? 'selected' : ''}>Tag overlap (IDF-boostable)</option>
+          <option value="jaccard" ${tagMetric === 'jaccard' ? 'selected' : ''}>Weighted Jaccard (IDF)</option>
+          <option value="cosine" ${tagMetric === 'cosine' ? 'selected' : ''}>Cosine (TF-IDF on tags)</option>
+          <option value="dice" ${tagMetric === 'dice' ? 'selected' : ''}>Dice coefficient</option>
+          <option value="hamming" ${tagMetric === 'hamming' ? 'selected' : ''}>Hamming distance</option>
+          <option value="manhattan" ${tagMetric === 'manhattan' ? 'selected' : ''}>Manhattan distance</option>
+          <option value="euclidean" ${tagMetric === 'euclidean' ? 'selected' : ''}>Euclidean distance</option>
+          <option value="tanimoto" ${tagMetric === 'tanimoto' ? 'selected' : ''}>Tanimoto coefficient</option>
+          <option value="ochiai" ${tagMetric === 'ochiai' ? 'selected' : ''}>Ochiai coefficient</option>
+          <option value="simpson" ${tagMetric === 'simpson' ? 'selected' : ''}>Simpson coefficient</option>
+          <option value="braun-blanquet" ${tagMetric === 'braun-blanquet' ? 'selected' : ''}>Braun-Blanquet</option>
         </select>
 
+        <label class="hint">Description similarity</label>
+        <select data-sim="desc-metric" style="margin-bottom:10px">
+          <option value="none" ${descMetric === 'none' ? 'selected' : ''}>None</option>
+          <option value="cosine" ${descMetric === 'cosine' ? 'selected' : ''}>Cosine (TF-IDF)</option>
+          <option value="cosine-1gram" ${descMetric === 'cosine-1gram' ? 'selected' : ''}>Cosine (1-gram only)</option>
+          <option value="cosine-2gram" ${descMetric === 'cosine-2gram' ? 'selected' : ''}>Cosine (1-2 gram)</option>
+          <option value="cosine-3gram" ${descMetric === 'cosine-3gram' ? 'selected' : ''}>Cosine (1-3 gram)</option>
+          <option value="cosine-4gram" ${descMetric === 'cosine-4gram' ? 'selected' : ''}>Cosine (1-4 gram)</option>
+          <option value="bm25" ${descMetric === 'bm25' ? 'selected' : ''}>BM25 similarity</option>
+          <option value="bm25-2gram" ${descMetric === 'bm25-2gram' ? 'selected' : ''}>BM25 (1-2 gram)</option>
+          <option value="bm25-3gram" ${descMetric === 'bm25-3gram' ? 'selected' : ''}>BM25 (1-3 gram)</option>
+          <option value="bm25-4gram" ${descMetric === 'bm25-4gram' ? 'selected' : ''}>BM25 (1-4 gram)</option>
+          <option value="jaccard-text" ${descMetric === 'jaccard-text' ? 'selected' : ''}>Jaccard (word sets)</option>
+          <option value="jaccard-2gram" ${descMetric === 'jaccard-2gram' ? 'selected' : ''}>Jaccard (2-gram sets)</option>
+          <option value="jaccard-3gram" ${descMetric === 'jaccard-3gram' ? 'selected' : ''}>Jaccard (3-gram sets)</option>
+          <option value="jaccard-4gram" ${descMetric === 'jaccard-4gram' ? 'selected' : ''}>Jaccard (4-gram sets)</option>
+          <option value="dice-text" ${descMetric === 'dice-text' ? 'selected' : ''}>Dice coefficient (words)</option>
+          <option value="overlap-text" ${descMetric === 'overlap-text' ? 'selected' : ''}>Word overlap count</option>
+          <option value="levenshtein" ${descMetric === 'levenshtein' ? 'selected' : ''}>Levenshtein distance</option>
+          <option value="jaro-winkler" ${descMetric === 'jaro-winkler' ? 'selected' : ''}>Jaro-Winkler</option>
+          <option value="lcs" ${descMetric === 'lcs' ? 'selected' : ''}>Longest common subsequence</option>
+          <option value="semantic-hash" ${descMetric === 'semantic-hash' ? 'selected' : ''}>Semantic hash similarity</option>
+        </select>
+
+        <label class="hint">Tag/Description weighting</label>
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+          <span style="font-size:12px;color:var(--muted);min-width:40px">Tags</span>
+          <input type="range" min="0" max="100" value="${persistedValues.alpha || 60}" step="5" data-sim="alpha" style="flex:1"/>
+          <span style="min-width:30px;text-align:center;font-size:12px" data-sim="alpha-val">${persistedValues.alpha || 60}%</span>
+          <span style="font-size:12px;color:var(--muted);min-width:60px">Description</span>
+        </div>
+
+        <label class="hint">N-gram range (for applicable metrics)</label>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <input type="range" min="1" max="4" value="${persistedValues.ngramMin || 1}" step="1" data-sim="ngram-min" style="flex:1"/>
+          <span style="min-width:20px;text-align:center" data-sim="ngram-min-val">${persistedValues.ngramMin || 1}</span>
+          <span style="color:var(--muted)">to</span>
+          <input type="range" min="1" max="4" value="${persistedValues.ngramMax || 3}" step="1" data-sim="ngram-max" style="flex:1"/>
+          <span style="min-width:20px;text-align:center" data-sim="ngram-max-val">${persistedValues.ngramMax || 3}</span>
+        </div>
+
         <label class="hint">Min shared tags</label>
-        <input type="range" min="0" max="64" value="2" step="1" data-sim="min-shared"/>
-        <div class="hint" style="margin-bottom:10px"><span data-sim="min-shared-val">2</span></div>
+        <input type="range" min="0" max="64" value="${minShared}" step="1" data-sim="min-shared"/>
+        <div class="hint" style="margin-bottom:10px"><span data-sim="min-shared-val">${minShared}</span></div>
 
         <label class="hint" id="invdf">Rarity boost (× IDF)</label>
-        <input type="range" min="0" max="200" value="100" step="5" data-sim="idf-mul"/>
-        <div class="hint" style="margin-bottom:10px"><span data-sim="idf-mul-val">1.0×</span></div>
+        <input type="range" min="0" max="200" value="${idfMul}" step="5" data-sim="idf-mul"/>
+        <div class="hint" style="margin-bottom:10px"><span data-sim="idf-mul-val">${(idfMul/100).toFixed(1)}×</span></div>
 
         <label class="hint">Limit results</label>
-        <input type="range" min="50" max="2000" value="500" step="50" data-sim="limit"/>
-        <div class="hint" style="margin-bottom:10px"><span data-sim="limit-val">500</span></div>
+        <input type="range" min="50" max="2000" value="${limit}" step="50" data-sim="limit"/>
+        <div class="hint" style="margin-bottom:10px"><span data-sim="limit-val">${limit}</span></div>
 
         <div class="hint" style="margin:8px 0 6px">Top tags in current similar set:</div>
         <div class="chips" data-sim="tag-cloud"></div>
@@ -485,33 +768,74 @@ function createSimilarityAside(refRow){
   const content = document.querySelector('.content');
   if (content) content.insertBefore(aside, content.firstElementChild);
 
-  const minShared = aside.querySelector('[data-sim="min-shared"]');
+  const minSharedEl = aside.querySelector('[data-sim="min-shared"]');
   const minSharedVal = aside.querySelector('[data-sim="min-shared-val"]');
-  minShared?.addEventListener('input', ()=> minSharedVal.textContent = String(minShared.value));
+  minSharedEl?.addEventListener('input', ()=> minSharedVal.textContent = String(minSharedEl.value));
 
-  const idfMul = aside.querySelector('[data-sim="idf-mul"]');
+  const idfMulEl = aside.querySelector('[data-sim="idf-mul"]');
   const idfMulhint = aside.querySelector('#invdf')
   const idfMulVal = aside.querySelector('[data-sim="idf-mul-val"]');
-  idfMul?.addEventListener('input', ()=> idfMulVal.textContent = (Number(idfMul.value)/100).toFixed(1) + '×');
+  idfMulEl?.addEventListener('input', ()=> idfMulVal.textContent = (Number(idfMulEl.value)/100).toFixed(1) + '×');
 
-  const limit = aside.querySelector('[data-sim="limit"]');
+  const limitEl = aside.querySelector('[data-sim="limit"]');
   const limitVal = aside.querySelector('[data-sim="limit-val"]');
-  limit?.addEventListener('input', ()=> limitVal.textContent = String(limit.value));
+  limitEl?.addEventListener('input', ()=> limitVal.textContent = String(limitEl.value));
+
+  const ngramMinEl = aside.querySelector('[data-sim="ngram-min"]');
+  const ngramMinVal = aside.querySelector('[data-sim="ngram-min-val"]');
+  ngramMinEl?.addEventListener('input', ()=> {
+    ngramMinVal.textContent = String(ngramMinEl.value);
+    // Ensure min <= max
+    const maxEl = aside.querySelector('[data-sim="ngram-max"]');
+    if (maxEl && Number(ngramMinEl.value) > Number(maxEl.value)) {
+      maxEl.value = ngramMinEl.value;
+      aside.querySelector('[data-sim="ngram-max-val"]').textContent = ngramMinEl.value;
+    }
+  });
+
+  const ngramMaxEl = aside.querySelector('[data-sim="ngram-max"]');
+  const ngramMaxVal = aside.querySelector('[data-sim="ngram-max-val"]');
+  ngramMaxEl?.addEventListener('input', ()=> {
+    ngramMaxVal.textContent = String(ngramMaxEl.value);
+    // Ensure max >= min
+    const minEl = aside.querySelector('[data-sim="ngram-min"]');
+    if (minEl && Number(ngramMaxEl.value) < Number(minEl.value)) {
+      minEl.value = ngramMaxEl.value;
+      aside.querySelector('[data-sim="ngram-min-val"]').textContent = ngramMaxEl.value;
+    }
+  });
+
+  const alphaEl = aside.querySelector('[data-sim="alpha"]');
+  const alphaVal = aside.querySelector('[data-sim="alpha-val"]');
+  alphaEl?.addEventListener('input', ()=> {
+    alphaVal.textContent = String(alphaEl.value) + '%';
+  });
 
   aside.querySelector('[data-sim="back"]')?.addEventListener('click', (e)=>{
     e.preventDefault();
     exitSimilarityMode();
   });
 
-  // Hide IDF boost when metric != overlap (only overlap uses the per-tag 1+IDF*(mul-1) trick):contentReference[oaicite:3]{index=3}
-  const metricSel = aside.querySelector('[data-sim="metric"]');
-  const idfBlockInputs = [idfMul, idfMulhint, idfMulVal?.parentElement?.previousElementSibling, idfMul?.nextElementSibling];
+  const tagMetricSel = aside.querySelector('[data-sim="tag-metric"]');
+  const descMetricSel = aside.querySelector('[data-sim="desc-metric"]');
+
+  const idfBlockInputs = [
+    idfMulEl,
+    idfMulVal,
+    idfMulhint
+  ];
+
   const toggleIdfVisibility = ()=>{
-    const show = metricSel?.value === 'overlap';
+    const show = tagMetricSel?.value === 'overlap';
     idfBlockInputs.forEach(el => { if (el && el instanceof HTMLElement) el.style.display = show ? '' : 'none'; });
   };
-  metricSel?.addEventListener('change', toggleIdfVisibility);
+  tagMetricSel?.addEventListener('change', toggleIdfVisibility);
   toggleIdfVisibility();
+
+  descMetricSel?.addEventListener('change', e=>{
+    if (e.target.value !== 'none') CardsBackend.ensureTextIndex();
+  });
+
 
   return aside;
 }
@@ -521,38 +845,76 @@ function enterSimilarityMode(refRow){
   const B = window.CardsBackend;
   if (!B?.store || !B?.query) return;
 
-  const aside = createSimilarityAside(refRow);
+  const aside = createSimilarityAside(refRow); // builds the Similarity sidebar UI
 
   const run = () => {
-    const { store } = B;
-
-    const metric = aside.querySelector('[data-sim="metric"]')?.value || 'jaccard';
-    const minShared = Number(aside.querySelector('[data-sim="min-shared"]')?.value || 0);
+    const tagMetric = aside.querySelector('[data-sim="tag-metric"]')?.value || 'none';
+    const descMetric = aside.querySelector('[data-sim="desc-metric"]')?.value || 'none';
+    const minSharedInput = Number(aside.querySelector('[data-sim="min-shared"]')?.value || 0);
     const idfMul = Number(aside.querySelector('[data-sim="idf-mul"]')?.value || 100) / 100;
     const limit = Number(aside.querySelector('[data-sim="limit"]')?.value || 500);
 
-    const refSet = new Set((refRow.tags || []).map(String));
+    const includeText = descMetric !== 'none';
+    const includeTags = tagMetric !== 'none';
 
-    // Filter candidates by min shared tags first (fast pass)
+    if (includeText) CardsBackend.ensureTextIndex(); // one-time TF-IDF build for descriptions
+
+    // If tags are disabled, do NOT pre-filter by "min shared tags"
+    const minShared = includeTags ? minSharedInput : 0;
+
+    // Tag mode passed 1:1 to backend
+    const tagMode = (tagMetric === 'overlap' || tagMetric === 'jaccard' || tagMetric === 'cosine') ? tagMetric : 'cosine';
+
+    // Get alpha from slider (convert percentage to decimal)
+    const alphaPercent = Number(aside.querySelector('[data-sim="alpha"]')?.value || 60);
+    const alpha = (includeTags && includeText) ? (alphaPercent / 100) : (includeTags ? 1.0 : 0.0);
+
+    // Fast pre-filter by min shared tags (only if tags are in play)
+    const refSet = new Set((refRow.tags || []).map(String));
     let candidates = B.store.rows.filter(x => x.id !== refRow.id).filter(x => {
       if (!minShared) return true;
-      let c = 0; for (const t of x.tags) if (refSet.has(t)) { c++; if (c>=minShared) break; }
+      let c = 0;
+      for (const t of x.tags) { if (refSet.has(t)) { c++; if (c >= minShared) break; } }
       return c >= minShared;
     });
 
-    // Score + sort with requested metric
-    const scored = computeSimilarityScores(metric, refRow, candidates, store, idfMul);
-    let rows = scored.map(s => s.row);
+    // Get n-gram settings
+    const ngramMin = Number(aside.querySelector('[data-sim="ngram-min"]')?.value || 1);
+    const ngramMax = Number(aside.querySelector('[data-sim="ngram-max"]')?.value || 3);
+
+    // Score with combinedSimilarity
+    const opts = { 
+      tagMode, 
+      descMode: descMetric, 
+      weightTags: true, 
+      includeText, 
+      includeTags, 
+      alpha, 
+      idfMul,
+      ngramMin,
+      ngramMax
+    };
+    const scored = [];
+    for (const r of candidates){
+      const s = CardsBackend.query.combinedSimilarity(refRow.id, r.id, opts);
+      scored.push({ row: r, score: s });
+    }
+    scored.sort((a,b)=> b.score - a.score || String(a.row.name||'').localeCompare(String(b.row.name||'')));
+    let rows = scored.map(s => {
+      // Attach similarity score to the row for display
+      s.row._similarityScore = s.score;
+      return s.row;
+    });
 
     if (isFinite(limit) && rows.length > limit) rows = rows.slice(0, limit);
 
-    // Stream render using existing infra:contentReference[oaicite:4]{index=4}
+    // Stream render via existing infra
     resetStream(rows, null);
     ensureObserver(true);
     while (stream.idx < stream.rows.length && sentinelVisible()) renderNextChunk();
     ensureObserver();
 
-    // Live tag cloud
+    // Tag cloud from current set
     computeTagFreq(rows);
     const cloud = aside.querySelector('[data-sim="tag-cloud"]');
     if (cloud){
@@ -565,17 +927,47 @@ function enterSimilarityMode(refRow){
       }
     }
 
-    // header metrics
+    // Header metrics
     updateMetrics(B.store.rows.length, rows.length, rows.length);
   };
 
+  // Persist settings and re-run when any sim control changes
+  const persistSettings = () => {
+    window.similaritySettings = {
+      tagMetric: aside.querySelector('[data-sim="tag-metric"]')?.value || 'jaccard',
+      descMetric: aside.querySelector('[data-sim="desc-metric"]')?.value || 'none',
+      minShared: Number(aside.querySelector('[data-sim="min-shared"]')?.value || 2),
+      idfMul: Number(aside.querySelector('[data-sim="idf-mul"]')?.value || 100),
+      limit: Number(aside.querySelector('[data-sim="limit"]')?.value || 500),
+      ngramMin: Number(aside.querySelector('[data-sim="ngram-min"]')?.value || 1),
+      ngramMax: Number(aside.querySelector('[data-sim="ngram-max"]')?.value || 3),
+      alpha: Number(aside.querySelector('[data-sim="alpha"]')?.value || 60)
+    };
+  };
+
   aside.querySelectorAll('input[data-sim], select[data-sim]').forEach(el => {
-    el.addEventListener('input', run);
-    el.addEventListener('change', run);
+    el.addEventListener('input', () => { persistSettings(); run(); });
+    el.addEventListener('change', () => { persistSettings(); run(); });
   });
+
+  // Toggling either source re-runs (and prebuilds text index if needed)
+  const tagMetricSel = aside.querySelector('[data-sim="tag-metric"]');
+  const descMetricSel = aside.querySelector('[data-sim="desc-metric"]');
+  function rerunSimilarity(){
+    if (descMetricSel?.value !== 'none') CardsBackend.ensureTextIndex();
+    run();
+  }
+  tagMetricSel?.addEventListener('change', rerunSimilarity);
+  descMetricSel?.addEventListener('change', rerunSimilarity);
+
+  // If page opens with text ON, prebuild once
+  if (descMetricSel?.value !== 'none') CardsBackend.ensureTextIndex();
 
   run();
 }
+
+
+
 function exitSimilarityMode(){
   // remove similarity panel
   const sim = document.querySelector('aside.sidebar.similarity');
@@ -688,7 +1080,8 @@ function collectState(){
 }
 
 function apply(){
-  const B = window.CardsBackend; if (!B || !B.store) return;
+  const B = window.CardsBackend; 
+  if (!B || !B.store) return;
   const { store, query } = B;
   const st = collectState();
 
@@ -697,20 +1090,52 @@ function apply(){
     expr: st.expr,
     tagCountMin: st.kMin,
     tagCountMax: st.kMax,
-    rarityMin: isFinite(st.rMin) ? st.rMin : 0   // <— now applied
+    rarityMin: isFinite(st.rMin) ? st.rMin : 0
   });
 
-  // 2) Token/text search
-  let idSet = query.searchTokens(st.search);
-  const text = String(st.search||'').toLowerCase();
-  const rows1 = filtered.filter(r => idSet.has(r.id));
-  const rows2 = (text
-    ? filtered.filter(r =>
-        !idSet.has(r.id) &&
-        ((r.creator_notes||'').toLowerCase().includes(text) ||
-         (r.description||'').toLowerCase().includes(text)))
-    : []);
-  let rows = rows1.concat(rows2);
+  // 2) Token/text search with weighting
+  const text = String(st.search || "").trim().toLowerCase();
+  const idSet = query.searchTokens(st.search);
+
+  // Tunable weights
+  const W_NAME   = 8;
+  const W_TOKEN  = 3;
+  const W_NOTES  = 1;
+  const W_DESC   = 1;
+
+  let rows;
+  if (!text){
+    // No free-text → keep all filtered rows, neutral score
+    rows = filtered.slice();
+  } else {
+    const scored = [];
+    for (const r of filtered){
+      let s = 0;
+
+      // Name match (boost hard)
+      const name = String(r.name || "").toLowerCase();
+      if (name && name.includes(text)) s += W_NAME;
+
+      // Token index membership
+      if (idSet.has(r.id)) s += W_TOKEN;
+
+      // Body matches (notes + description)
+      const notes = String(r.creator_notes || "").toLowerCase();
+      const desc  = String(r.description   || "").toLowerCase();
+      if (notes.includes(text)) s += W_NOTES;
+      if (desc.includes(text))  s += W_DESC;
+
+      if (s > 0){
+        r._searchScore = s;
+        scored.push(r);
+      }
+    }
+
+    // Sort by weighted relevance, then stable tie-breaker by name
+    scored.sort((a,b)=> (b._searchScore - a._searchScore) ||
+                        String(a.name||'').localeCompare(String(b.name||'')));
+    rows = scored;
+  }
 
   // Live tag frequency over rows the user is actually seeing
   computeTagFreq(rows);
@@ -719,12 +1144,21 @@ function apply(){
   let afterM = rows.length;
   if (st.tags.length && st.m > 0){
     const set = new Set(st.tags.map(s => s.trim().toLowerCase()));
-    rows = rows.filter(r => { let c = 0; for (const t of r.tags) if (set.has(t)) c++; return c >= st.m; });
+    rows = rows.filter(r => {
+      let c = 0; 
+      for (const t of r.tags) { if (set.has(t)) { c++; if (c >= st.m) break; } }
+      return c >= st.m;
+    });
     afterM = rows.length;
   }
 
   // 4) Sort
-  query.sort(rows, { by: st.sort.by, dir: st.sort.dir, weightsInput: st.weightsInput });
+  // IMPORTANT: preserve search relevance order when a search term is active.
+  if (!text){
+    // Only apply user sort when there is no active text search
+    query.sort(rows, { by: st.sort.by, dir: st.sort.dir, weightsInput: st.weightsInput });
+  }
+  // else: keep the relevance order produced above
 
   // 5) Stream render + metrics
   const weights = B.parseWeights(st.weightsInput);
@@ -732,10 +1166,10 @@ function apply(){
   ensureObserver(true);
   while (stream.idx < stream.rows.length && sentinelVisible()) renderNextChunk();
 
-  // Update metrics to include rarity step for clarity
   updateMetrics(store.rows.length, filtered.length, afterM);
   ensureObserver();
 }
+
 
 
 const applyDebounced = debounce(apply, 200);
