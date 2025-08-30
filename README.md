@@ -1,6 +1,6 @@
 # st-char-powersearch
 
-<img width="3407" height="1266" alt="image" src="https://github.com/user-attachments/assets/3dea4b0a-d322-4aad-830a-958ca9c57986" />
+<img width="3412" height="1305" alt="image" src="https://github.com/user-attachments/assets/5c5139de-3eb1-4e5d-973e-4ee471c5091f" />
 
 More powerful and faster character search for ST
 
